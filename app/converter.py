@@ -19,15 +19,80 @@ def sanitize_filename(title: str) -> str:
     return cleaned
 
 
+def preprocess_table_attributes(line: str) -> str:
+    """Fixes unclosed quotes in table attributes on lines starting with {|."""
+    stripped = line.strip()
+    if not stripped.startswith("{|"):
+        return line
+
+    # Extract the "{|" prefix
+    idx = line.find("{|")
+    prefix = line[:idx+2]
+    rest = line[idx+2:]
+
+    attr_pattern = re.compile(r'\b([a-zA-Z0-9_-]+)\s*=\s*')
+    matches = list(attr_pattern.finditer(rest))
+
+    if not matches:
+        return line
+
+    chunks = []
+    # Add everything before the first attribute
+    chunks.append(rest[:matches[0].start()])
+
+    for idx, match in enumerate(matches):
+        attr_name = match.group(1)
+        start_val_idx = match.end()
+        end_val_idx = matches[idx+1].start() if idx + 1 < len(matches) else len(rest)
+
+        val_part = rest[start_val_idx:end_val_idx]
+        val_stripped = val_part.strip()
+        if val_stripped.startswith('"'):
+            if val_stripped.count('"') == 1:
+                trailing_whitespace = val_part[len(val_stripped.rstrip()):]
+                if not trailing_whitespace and idx + 1 < len(matches):
+                    val_part = val_stripped + '" '
+                else:
+                    val_part = val_stripped + '"' + trailing_whitespace
+        elif val_stripped.startswith("'"):
+            if val_stripped.count("'") == 1:
+                trailing_whitespace = val_part[len(val_stripped.rstrip()):]
+                if not trailing_whitespace and idx + 1 < len(matches):
+                    val_part = val_stripped + "' "
+                else:
+                    val_part = val_stripped + "'" + trailing_whitespace
+
+        chunks.append(match.group(0) + val_part)
+
+    return prefix + "".join(chunks)
+
+
+def preprocess_wikitext(wikitext: str) -> str:
+    """Pre-processes Wikitext to clean up known malformed tags, e.g. unclosed quotes in table starts."""
+    if not wikitext:
+        return wikitext
+
+    lines = wikitext.splitlines()
+    processed_lines = []
+    for line in lines:
+        processed_line = preprocess_table_attributes(line)
+        processed_lines.append(processed_line)
+    return "\n".join(processed_lines)
+
+
 async def convert_wikitext_to_markdown(wikitext: str) -> str:
     """Converts MediaWiki wikitext to GitHub Flavored Markdown using Pandoc."""
     if not wikitext:
         return ""
 
     try:
+        # Run light pre-processing pass to correct malformed wikitext
+        wikitext = preprocess_wikitext(wikitext)
+
         # Run pandoc as an async subprocess to avoid blocking the event loop
+        # We use 'mediawiki+raw_html' as requested to be more lenient.
         process = await asyncio.create_subprocess_exec(
-            "pandoc", "--from", "mediawiki", "--to", "gfm",
+            "pandoc", "--from", "mediawiki+raw_html", "--to", "gfm",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE

@@ -68,15 +68,19 @@ async def connect_site(url: str) -> mwclient.Site:
     scheme = parsed.scheme or "https"
     host = parsed.netloc
 
-    paths_to_try = []
+    # Always prioritize '/' to connect instantly on the first try
+    paths_to_try = ["/"]
+
     if parsed.path and parsed.path != "/":
         url_path = parsed.path
         if not url_path.endswith("/"):
             url_path += "/"
-        paths_to_try.append(url_path)
+        # Avoid standard article paths (like /wiki/...) as they are not API endpoints
+        if not url_path.startswith("/wiki/") and url_path not in paths_to_try:
+            paths_to_try.append(url_path)
 
-    # Standard MediaWiki API paths to try
-    for p in ["/", "/w/", "/mediawiki/"]:
+    # Standard MediaWiki API paths to try as fallbacks
+    for p in ["/w/", "/mediawiki/"]:
         if p not in paths_to_try:
             paths_to_try.append(p)
 
@@ -155,6 +159,9 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                 "--path", temp_dir
             ]
             logger.info(f"Running subprocess command: {' '.join(cmd)}")
+
+            # Guarantee the temp folder is completely gone before the subprocess even starts
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,

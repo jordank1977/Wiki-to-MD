@@ -1,9 +1,11 @@
 services:
-  wiki-to-md:
-    image: ghcr.io/jordank1977/wiki-to-md:latest
-    container_name: wiki-to-md
-    restart: unless-stopped
+  wiki-rag-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wiki-rag-sync
     ports:
-      - 8000:8000
+      - "8000:8000"
     volumes:
       - ./data:/app/data
+    restart: unless-stopped

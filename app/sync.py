@@ -1,13 +1,9 @@
 import os
-import shutil
-import glob
-import re
 import asyncio
 import logging
 import datetime
 from urllib.parse import urlparse
-import xml.etree.ElementTree as ET
-from typing import Generator, Tuple, Optional, Dict
+from typing import Dict
 
 import mwclient
 
@@ -20,51 +16,9 @@ logger = logging.getLogger(__name__)
 
 RAW_DIR_ROOT = "/app/data/raw"
 COMPILED_DIR_ROOT = "/app/data/compiled"
-TEMP_DIR_ROOT = "/app/data/temp"
 
-# Global state to track real-time download counts from subprocess / xml parser per wiki ID
+# Global state to track real-time download counts per wiki ID
 current_download_count: Dict[int, int] = {}
-
-page_download_pattern = re.compile(r"^\s{4}(.+),\s\d+\sedits?$")
-
-
-def parse_xml_dump(xml_path: str) -> Generator[Tuple[str, str], None, None]:
-    """Parses a MediaWiki XML dump using memory-efficient iterparse.
-    Filters strictly for Namespace 0 (Main articles).
-    """
-    context = ET.iterparse(xml_path, events=("start", "end"))
-    context = iter(context)
-    try:
-        event, root = next(context)
-    except StopIteration:
-        return
-
-    # Extract namespace prefix
-    m = re.match(r"\{.*\}", root.tag)
-    ns = m.group(0) if m else ""
-
-    for event, elem in context:
-        if event == "end" and elem.tag == f"{ns}page":
-            title_elem = elem.find(f"{ns}title")
-            ns_elem = elem.find(f"{ns}ns")
-
-            title = title_elem.text if title_elem is not None else ""
-            namespace = ns_elem.text if ns_elem is not None else ""
-
-            # Namespace 0 represents main articles
-            if namespace == "0" and title:
-                # Filter out redirects
-                redirect_elem = elem.find(f"{ns}redirect")
-                if redirect_elem is None:
-                    revision = elem.find(f"{ns}revision")
-                    if revision is not None:
-                        text_elem = revision.find(f"{ns}text")
-                        text = text_elem.text if text_elem is not None and text_elem.text else ""
-                        yield title, text
-
-            # Clear elements from memory to keep footprint low
-            elem.clear()
-            root.clear()
 
 
 async def connect_site(url: str) -> mwclient.Site:
@@ -119,11 +73,9 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
     # Define paths
     raw_dir = os.path.join(RAW_DIR_ROOT, str(wiki_id))
     compiled_dir = os.path.join(COMPILED_DIR_ROOT, str(wiki_id))
-    temp_dir = os.path.join(TEMP_DIR_ROOT, str(wiki_id))
 
     os.makedirs(raw_dir, exist_ok=True)
     os.makedirs(compiled_dir, exist_ok=True)
-    os.makedirs(temp_dir, exist_ok=True)
 
     try:
         current_total_pages = 0
@@ -146,128 +98,7 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
         # Bootstrapping (Initial Ingestion)
         if not last_sync:
             logger.info(f"Starting initial ingestion for wiki: {wiki['name']} ({wiki['url']})")
-
-            # Initialize download count to 0
-            current_download_count[wiki_id] = 0
-
-            # Clean the temp directory before running wikiteam3dumpgenerator to avoid stale resumes
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                os.makedirs(temp_dir, exist_ok=True)
-            except Exception as e:
-                logger.warning(f"Failed to pre-clean temp directory {temp_dir}: {e}")
-
-            # Trigger wikiteam3 subprocess
-            cmd = [
-                "wikiteam3dumpgenerator",
-                wiki["url"],
-                "--xml",
-                "--curonly",
-                "--force",
-                "--namespaces", "0",
-                "--path", temp_dir
-            ]
-            logger.info(f"Running subprocess command: {' '.join(cmd)}")
-
-            # Guarantee the temp folder is completely gone before the subprocess even starts
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
-            # Automatically pass "n" to safeguard against interactive prompts and close stdin
-            try:
-                process.stdin.write(b"n\n")
-                await process.stdin.drain()
-                process.stdin.close()
-            except Exception as e:
-                logger.warning(f"Failed to write 'n\\n' or close wikiteam3 stdin: {e}")
-
-            # Consume subprocess stdout and stderr streams asynchronously to log in real-time
-            async def log_stream(stream, is_stderr=False):
-                nonlocal current_total_pages
-                while True:
-                    line_bytes = await stream.readline()
-                    if not line_bytes:
-                        break
-                    line = line_bytes.decode('utf-8', errors='replace').rstrip()
-                    if line:
-                        if is_stderr:
-                            logger.info(f"[wikiteam3-stderr] {line}")
-                        else:
-                            logger.info(f"[wikiteam3-stdout] {line}")
-                            match = page_download_pattern.match(line)
-                            if match:
-                                current_download_count[wiki_id] = current_download_count.get(wiki_id, 0) + 1
-                                # Dynamic Denominator Adjustment during subprocess run
-                                if current_download_count[wiki_id] > current_total_pages:
-                                    current_total_pages = current_download_count[wiki_id]
-                                    await update_wiki_total_pages(wiki_id, current_total_pages)
-
-            try:
-                await asyncio.gather(
-                    log_stream(process.stdout, is_stderr=False),
-                    log_stream(process.stderr, is_stderr=True),
-                    process.wait()
-                )
-            except asyncio.CancelledError:
-                logger.info("Sync pipeline cancelled. Terminating wikiteam3 subprocess...")
-                try:
-                    process.terminate()
-                    await process.wait()
-                except Exception as e:
-                    logger.warning(f"Failed to terminate wikiteam3 subprocess: {e}")
-                raise
-
-            if process.returncode != 0:
-                logger.warning(
-                    f"wikiteam3dumpgenerator exited with non-zero code {process.returncode}. "
-                    f"Falling back to crawling API with mwclient."
-                )
-                # Fallback to mwclient Crawl Ingestion
-                await run_mwclient_full_crawl(wiki_id, wiki["url"], raw_dir)
-            else:
-                logger.info("wikiteam3dumpgenerator completed successfully. Parsing XML dump...")
-                # Find parsed XML files
-                xml_files = glob.glob(os.path.join(temp_dir, "**/*.xml"), recursive=True)
-                if not xml_files:
-                    logger.warning("No XML file found in wikiteam3 output. Falling back to mwclient crawl.")
-                    await run_mwclient_full_crawl(wiki_id, wiki["url"], raw_dir)
-                else:
-                    # Parse the first XML file found
-                    xml_path = xml_files[0]
-                    logger.info(f"Found XML dump file: {xml_path}")
-
-                    pages_count = 0
-                    for title, wikitext in parse_xml_dump(xml_path):
-                        # Convert and save
-                        markdown = await convert_wikitext_to_markdown(wikitext)
-                        filename = sanitize_filename(title) + ".md"
-                        file_path = os.path.join(raw_dir, filename)
-
-                        with open(file_path, "w", encoding="utf-8") as f:
-                            f.write(markdown)
-
-                        pages_count += 1
-                        current_download_count[wiki_id] = pages_count
-                        logger.info(f"Page downloaded and saved from XML: '{title}' ({pages_count} total)")
-
-                        # Dynamic Denominator Adjustment
-                        if pages_count > current_total_pages:
-                            current_total_pages = pages_count
-                            await update_wiki_total_pages(wiki_id, current_total_pages)
-
-                    logger.info(f"Initial XML ingestion complete. Extracted {pages_count} pages.")
-
-            # Clean up temp folder
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception as e:
-                logger.warning(f"Failed to clean up temp directory {temp_dir}: {e}")
+            await run_mwclient_bulk_sync(wiki_id, wiki["url"], raw_dir)
 
         # Incremental Syncing
         else:
@@ -300,42 +131,90 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
         current_download_count.pop(wiki_id, None)
 
 
-async def run_mwclient_full_crawl(wiki_id: int, url: str, raw_dir: str) -> None:
-    """Fallback crawl of the full wiki using mwclient."""
-    logger.info("Running fallback full crawl using mwclient API...")
+async def run_mwclient_bulk_sync(wiki_id: int, url: str, raw_dir: str) -> None:
+    """Bulk sync of the full wiki using MediaWiki's generator API."""
+    logger.info("Running bulk sync using mwclient API generator...")
     site = await connect_site(url)
 
     wiki = await get_wiki(wiki_id)
     current_total_pages = wiki["total_pages"] if wiki else 0
 
     pages_count = 0
-    # mwclient site.allpages generates all pages, filtering out redirects
-    for page in site.allpages(namespace='0', filterredir='nonredirects'):
-        title = page.name
+    current_download_count[wiki_id] = 0
+
+    kwargs = {
+        'action': 'query',
+        'generator': 'allpages',
+        'gapnamespace': 0,
+        'gapfilterredir': 'nonredirects',  # Filters out redirect pages
+        'gaplimit': 50,  # Fetch up to 50 pages per API call
+        'prop': 'revisions',
+        'rvprop': 'content',
+        'rvslots': 'main'
+    }
+
+    continue_params = {}
+    while True:
+        params = {**kwargs, **continue_params}
+        logger.info(f"Fetching bulk pages with params: {params}")
         try:
-            wikitext = page.text()
-            markdown = await convert_wikitext_to_markdown(wikitext)
-            filename = sanitize_filename(title) + ".md"
-            file_path = os.path.join(raw_dir, filename)
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(markdown)
-
-            pages_count += 1
-            logger.info(f"Page downloaded and saved: '{title}' ({pages_count} total)")
-
-            # Dynamic Denominator Adjustment
-            if pages_count > current_total_pages:
-                current_total_pages = pages_count
-                await update_wiki_total_pages(wiki_id, current_total_pages)
-
+            res = await asyncio.to_thread(site.api, **params)
         except Exception as e:
-            logger.error(f"Failed to crawl page '{title}': {e}")
+            logger.error(f"Failed bulk API query: {e}")
+            break
 
-        # AGENTS.md rate limiting rule: MUST include 1s sleep per iteration
-        await asyncio.sleep(1)
+        query_data = res.get("query", {})
+        pages_data = query_data.get("pages", {})
 
-    logger.info(f"Fallback crawl complete. Saved {pages_count} pages.")
+        for page_key, page_val in pages_data.items():
+            # Check for cancellation and yield execution
+            await asyncio.sleep(0)
+
+            title = page_val.get("title")
+            if "missing" in page_val or not title:
+                continue
+
+            revisions = page_val.get("revisions", [])
+            if not revisions:
+                continue
+
+            rev = revisions[0]
+            wikitext = ""
+            if "slots" in rev and "main" in rev["slots"]:
+                wikitext = rev["slots"]["main"].get("*", "") or ""
+            elif "*" in rev:
+                wikitext = rev.get("*", "") or ""
+
+            try:
+                markdown = await convert_wikitext_to_markdown(wikitext)
+                filename = sanitize_filename(title) + ".md"
+                file_path = os.path.join(raw_dir, filename)
+
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(markdown)
+
+                pages_count += 1
+                current_download_count[wiki_id] = pages_count
+                logger.info(f"Page bulk downloaded and saved: '{title}' ({pages_count} total)")
+
+                # Dynamic Denominator Adjustment
+                if pages_count > current_total_pages:
+                    current_total_pages = pages_count
+                    await update_wiki_total_pages(wiki_id, current_total_pages)
+
+            except Exception as e:
+                logger.error(f"Failed to process page '{title}': {e}")
+
+        if "continue" in res:
+            continue_params = res["continue"]
+            logger.info(f"More pages available. Continuing with token: {continue_params}")
+        else:
+            break
+
+        # Respect 1.5s delay between requests
+        await asyncio.sleep(1.5)
+
+    logger.info(f"Bulk sync complete. Saved {pages_count} pages.")
 
 
 async def run_mwclient_incremental_sync(wiki_id: int, url: str, raw_dir: str, last_sync_time_str: str) -> None:

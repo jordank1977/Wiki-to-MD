@@ -7,7 +7,7 @@ import logging
 import datetime
 from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
-from typing import Generator, Tuple, Optional
+from typing import Generator, Tuple, Optional, Dict
 
 import mwclient
 
@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 RAW_DIR_ROOT = "/app/data/raw"
 COMPILED_DIR_ROOT = "/app/data/compiled"
 TEMP_DIR_ROOT = "/app/data/temp"
+
+# Global state to track real-time download counts from subprocess / xml parser per wiki ID
+current_download_count: Dict[int, int] = {}
+
+page_download_pattern = re.compile(r"^\s{4}(.+),\s\d+\sedits?$")
 
 
 def parse_xml_dump(xml_path: str) -> Generator[Tuple[str, str], None, None]:
@@ -142,6 +147,9 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
         if not last_sync:
             logger.info(f"Starting initial ingestion for wiki: {wiki['name']} ({wiki['url']})")
 
+            # Initialize download count to 0
+            current_download_count[wiki_id] = 0
+
             # Clean the temp directory before running wikiteam3dumpgenerator to avoid stale resumes
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -180,6 +188,7 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
 
             # Consume subprocess stdout and stderr streams asynchronously to log in real-time
             async def log_stream(stream, is_stderr=False):
+                nonlocal current_total_pages
                 while True:
                     line_bytes = await stream.readline()
                     if not line_bytes:
@@ -190,6 +199,13 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                             logger.info(f"[wikiteam3-stderr] {line}")
                         else:
                             logger.info(f"[wikiteam3-stdout] {line}")
+                            match = page_download_pattern.match(line)
+                            if match:
+                                current_download_count[wiki_id] = current_download_count.get(wiki_id, 0) + 1
+                                # Dynamic Denominator Adjustment during subprocess run
+                                if current_download_count[wiki_id] > current_total_pages:
+                                    current_total_pages = current_download_count[wiki_id]
+                                    await update_wiki_total_pages(wiki_id, current_total_pages)
 
             try:
                 await asyncio.gather(
@@ -236,6 +252,7 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                             f.write(markdown)
 
                         pages_count += 1
+                        current_download_count[wiki_id] = pages_count
                         logger.info(f"Page downloaded and saved from XML: '{title}' ({pages_count} total)")
 
                         # Dynamic Denominator Adjustment
@@ -278,6 +295,8 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
     except Exception as e:
         logger.exception(f"Error in sync pipeline for wiki {wiki_id}: {str(e)}")
         await update_wiki_status(wiki_id, "Error")
+    finally:
+        current_download_count.pop(wiki_id, None)
 
 
 async def run_mwclient_full_crawl(wiki_id: int, url: str, raw_dir: str) -> None:

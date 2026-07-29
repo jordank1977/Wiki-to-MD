@@ -35,7 +35,7 @@ from app.db import (
     update_wiki_sync_details,
     update_wiki_pending_changes,
 )
-from app.sync import sync_wiki_pipeline, connect_site
+from app.sync import sync_wiki_pipeline, connect_site, current_download_count
 from app.compiler import compile_wiki_bundles
 
 from app.logging_config import setup_logging, current_wiki_id
@@ -167,7 +167,9 @@ def get_compiled_bundles_count(wiki_id: int) -> int:
 
 
 def get_downloaded_pages_count(wiki_id: int) -> int:
-    """Calculates number of raw markdown files in the raw directory."""
+    """Calculates number of raw markdown files in the raw directory or returns real-time download count if active."""
+    if current_download_count.get(wiki_id, 0) > 0:
+        return current_download_count[wiki_id]
     raw_dir = f"/app/data/raw/{wiki_id}"
     if not os.path.exists(raw_dir):
         return 0

@@ -138,6 +138,13 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
         if not last_sync:
             logger.info(f"Starting initial ingestion for wiki: {wiki['name']} ({wiki['url']})")
 
+            # Clean the temp directory before running wikiteam3dumpgenerator to avoid stale resumes
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                os.makedirs(temp_dir, exist_ok=True)
+            except Exception as e:
+                logger.warning(f"Failed to pre-clean temp directory {temp_dir}: {e}")
+
             # Trigger wikiteam3 subprocess
             cmd = [
                 "wikiteam3dumpgenerator",
@@ -156,12 +163,13 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                 stderr=asyncio.subprocess.PIPE
             )
 
-            # Automatically pass "y" to resume prompts
+            # Automatically pass "n" to safeguard against interactive prompts and close stdin
             try:
-                process.stdin.write(b"y\n")
+                process.stdin.write(b"n\n")
                 await process.stdin.drain()
+                process.stdin.close()
             except Exception as e:
-                logger.warning(f"Failed to write 'y\\n' to wikiteam3 stdin: {e}")
+                logger.warning(f"Failed to write 'n\\n' or close wikiteam3 stdin: {e}")
 
             # Consume subprocess stdout and stderr streams asynchronously to log in real-time
             async def log_stream(stream, is_stderr=False):

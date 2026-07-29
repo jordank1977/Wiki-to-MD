@@ -42,6 +42,18 @@ from app.logging_config import setup_logging, current_wiki_id
 setup_logging()
 logger = logging.getLogger("app.main")
 
+
+class EndpointFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Uvicorn access log args: (client_addr, method, path, http_version, status_code)
+        if record.args and len(record.args) >= 3:
+            path = record.args[2]
+            # Filter out the noisy polling endpoints
+            if path in ["/api/status", "/api/wikis", "/api/logs/global"]:
+                return False
+        return True
+
+
 watcher_task: Any = None
 
 
@@ -146,6 +158,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 
 
 # Input Pydantic Model

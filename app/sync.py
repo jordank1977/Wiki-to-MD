@@ -164,6 +164,7 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                 "--xml",
                 "--curonly",
                 "--force",
+                "--namespaces", "0",
                 "--path", temp_dir
             ]
             logger.info(f"Running subprocess command: {' '.join(cmd)}")

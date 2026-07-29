@@ -141,8 +141,12 @@ function renderWikis() {
 
         // Calculate progress percentage for Syncing state
         let percent = 0;
-        if (wiki.total_pages > 0) {
-            percent = Math.min(100, Math.round((wiki.downloaded_pages / wiki.total_pages) * 100));
+        let displayTotal = wiki.total_pages;
+        if (wiki.downloaded_pages > displayTotal) {
+            displayTotal = wiki.downloaded_pages;
+        }
+        if (displayTotal > 0) {
+            percent = Math.min(100, Math.round((wiki.downloaded_pages / displayTotal) * 100));
         }
 
         // Updates Available warning indicator
@@ -221,7 +225,7 @@ function renderWikis() {
                             <div class="flex-1 capacitor-bar">
                                 <div class="capacitor-bar-fill" style="width: ${percent}%"></div>
                             </div>
-                            <span class="text-xs font-mono-tech text-slate-400 whitespace-nowrap">${wiki.downloaded_pages}/${wiki.total_pages} [${percent}%]</span>
+                            <span class="text-xs font-mono-tech text-slate-400 whitespace-nowrap">${wiki.downloaded_pages}/${displayTotal} [${percent}%]</span>
                         </div>
                     </div>
                 </div>

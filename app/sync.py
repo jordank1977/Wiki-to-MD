@@ -48,11 +48,14 @@ def parse_xml_dump(xml_path: str) -> Generator[Tuple[str, str], None, None]:
 
             # Namespace 0 represents main articles
             if namespace == "0" and title:
-                revision = elem.find(f"{ns}revision")
-                if revision is not None:
-                    text_elem = revision.find(f"{ns}text")
-                    text = text_elem.text if text_elem is not None and text_elem.text else ""
-                    yield title, text
+                # Filter out redirects
+                redirect_elem = elem.find(f"{ns}redirect")
+                if redirect_elem is None:
+                    revision = elem.find(f"{ns}revision")
+                    if revision is not None:
+                        text_elem = revision.find(f"{ns}text")
+                        text = text_elem.text if text_elem is not None and text_elem.text else ""
+                        yield title, text
 
             # Clear elements from memory to keep footprint low
             elem.clear()
@@ -114,6 +117,7 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
     os.makedirs(temp_dir, exist_ok=True)
 
     try:
+        current_total_pages = 0
         # Fetch site statistics before beginning sync
         try:
             logger.info(f"Connecting to site to fetch total pages statistics: {wiki['url']}")
@@ -123,8 +127,10 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
             total_pages_stat = site.siteinfo.get('statistics', {}).get('articles', 0)
             logger.info(f"Total pages tracking: found {total_pages_stat} articles from siteinfo")
             await update_wiki_total_pages(wiki_id, total_pages_stat)
+            current_total_pages = total_pages_stat
         except Exception as e:
             logger.error(f"Failed to fetch site statistics or update total pages: {e}")
+            current_total_pages = wiki.get("total_pages", 0) or 0
 
         last_sync = wiki.get("last_sync_timestamp")
 
@@ -217,6 +223,11 @@ async def sync_wiki_pipeline(wiki_id: int) -> None:
                         pages_count += 1
                         logger.info(f"Page downloaded and saved from XML: '{title}' ({pages_count} total)")
 
+                        # Dynamic Denominator Adjustment
+                        if pages_count > current_total_pages:
+                            current_total_pages = pages_count
+                            await update_wiki_total_pages(wiki_id, current_total_pages)
+
                     logger.info(f"Initial XML ingestion complete. Extracted {pages_count} pages.")
 
             # Clean up temp folder
@@ -259,9 +270,12 @@ async def run_mwclient_full_crawl(wiki_id: int, url: str, raw_dir: str) -> None:
     logger.info("Running fallback full crawl using mwclient API...")
     site = await connect_site(url)
 
+    wiki = await get_wiki(wiki_id)
+    current_total_pages = wiki["total_pages"] if wiki else 0
+
     pages_count = 0
-    # mwclient site.allpages generates all pages
-    for page in site.allpages(namespace='0'):
+    # mwclient site.allpages generates all pages, filtering out redirects
+    for page in site.allpages(namespace='0', filterredir='nonredirects'):
         title = page.name
         try:
             wikitext = page.text()
@@ -274,6 +288,12 @@ async def run_mwclient_full_crawl(wiki_id: int, url: str, raw_dir: str) -> None:
 
             pages_count += 1
             logger.info(f"Page downloaded and saved: '{title}' ({pages_count} total)")
+
+            # Dynamic Denominator Adjustment
+            if pages_count > current_total_pages:
+                current_total_pages = pages_count
+                await update_wiki_total_pages(wiki_id, current_total_pages)
+
         except Exception as e:
             logger.error(f"Failed to crawl page '{title}': {e}")
 
@@ -313,15 +333,26 @@ async def run_mwclient_incremental_sync(wiki_id: int, url: str, raw_dir: str, la
             logger.info(f"Syncing updated/new page: {title}")
             try:
                 page = site.pages[title]
-                wikitext = page.text()
-                markdown = await convert_wikitext_to_markdown(wikitext)
+                if page.redirects_to is not None:
+                    logger.info(f"Page '{title}' is a redirect. Removing local file if exists.")
+                    filename = sanitize_filename(title) + ".md"
+                    file_path = os.path.join(raw_dir, filename)
+                    if os.path.exists(file_path):
+                        try:
+                            os.remove(file_path)
+                            logger.info(f"Deleted redirect local file: {file_path}")
+                        except Exception as e:
+                            logger.error(f"Failed to delete local redirect file '{file_path}': {e}")
+                else:
+                    wikitext = page.text()
+                    markdown = await convert_wikitext_to_markdown(wikitext)
 
-                filename = sanitize_filename(title) + ".md"
-                file_path = os.path.join(raw_dir, filename)
+                    filename = sanitize_filename(title) + ".md"
+                    file_path = os.path.join(raw_dir, filename)
 
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(markdown)
-                logger.info(f"Page downloaded and saved: '{title}' (via incremental sync)")
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(markdown)
+                    logger.info(f"Page downloaded and saved: '{title}' (via incremental sync)")
 
             except Exception as e:
                 logger.error(f"Failed to sync updated page '{title}': {e}")
@@ -376,15 +407,18 @@ async def run_mwclient_incremental_sync(wiki_id: int, url: str, raw_dir: str, la
                 logger.info(f"Syncing moved target page: {target_title}")
                 try:
                     page = site.pages[target_title]
-                    wikitext = page.text()
-                    markdown = await convert_wikitext_to_markdown(wikitext)
+                    if page.redirects_to is not None:
+                        logger.info(f"Moved target page '{target_title}' is a redirect. Excluding.")
+                    else:
+                        wikitext = page.text()
+                        markdown = await convert_wikitext_to_markdown(wikitext)
 
-                    new_filename = sanitize_filename(target_title) + ".md"
-                    new_file_path = os.path.join(raw_dir, new_filename)
+                        new_filename = sanitize_filename(target_title) + ".md"
+                        new_file_path = os.path.join(raw_dir, new_filename)
 
-                    with open(new_file_path, "w", encoding="utf-8") as f:
-                        f.write(markdown)
-                    logger.info(f"Page downloaded and saved: '{target_title}' (moved target page via incremental sync)")
+                        with open(new_file_path, "w", encoding="utf-8") as f:
+                            f.write(markdown)
+                        logger.info(f"Page downloaded and saved: '{target_title}' (moved target page via incremental sync)")
                 except Exception as e:
                     logger.error(f"Failed to sync moved target page '{target_title}': {e}")
 

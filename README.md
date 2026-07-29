@@ -1,4 +1,4 @@
-# Wiki-to-MD Sync Engine
+# Wiki-to-RAG Sync Engine
 
 A production-ready, self-hosted web application that automatically syncs and compiles MediaWiki content into optimized, word-capped "Mega-Documents" designed for ingestion by Retrieval-Augmented Generation (RAG) platforms (such as Google NotebookLM).
 
@@ -6,7 +6,7 @@ A production-ready, self-hosted web application that automatically syncs and com
 
 Retrieval-Augmented Generation (RAG) tools like **NotebookLM** have revolutionized document analysis but impose strict platform-level constraints (e.g., a maximum of 50 uploaded sources and a 500,000-word limit per source). Attempting to sync a massive Wiki 1:1 (one file per page) quickly exceeds the source count limit, while uploading the entire wiki as a single massive document can easily exceed individual file limits.
 
-The **Wiki-to-MD Sync Engine** solves this dilemma. It sits between your MediaWiki target and your RAG pipelines, employing a smart **Two-Stage Pipeline** that guarantees fast, lightweight updates on the backend while automatically maintaining beautifully formatted, size-capped bundles optimized for RAG ingestion.
+The **Wiki-to-RAG Sync Engine** solves this dilemma. It sits between your MediaWiki target and your RAG pipelines, employing a smart **Two-Stage Pipeline** that guarantees fast, lightweight updates on the backend while automatically maintaining beautifully formatted, size-capped bundles optimized for RAG ingestion.
 
 ---
 
@@ -60,7 +60,7 @@ A background asyncio worker runs periodically (configurable, e.g., every 30 minu
 
 ## 🐳 Quick Start with Docker Compose
 
-Running the Wiki-to-MD Sync Engine is straightforward using Docker Compose.
+Running the Wiki-to-RAG Sync Engine is straightforward using Docker Compose.
 
 ### Prerequisites
 - Docker and Docker Compose installed on your system.
@@ -69,8 +69,8 @@ Running the Wiki-to-MD Sync Engine is straightforward using Docker Compose.
 
 1. **Clone the Repository:**
    ```bash
-   git clone https://github.com/example-username/Wiki-to-MD-sync.git
-   cd Wiki-to-MD-sync
+   git clone https://github.com/example-username/wiki-to-rag-sync.git
+   cd wiki-to-rag-sync
    ```
 
 2. **Configure Environment Variables (Optional):**
